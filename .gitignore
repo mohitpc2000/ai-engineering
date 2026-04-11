@@ -1,0 +1,20 @@
+# Python virtual environment — recreate with: pip install -r requirements.txt
+venv/
+.venv/
+env/
+
+# Python auto-generated compiled files — recreated automatically at runtime
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment variable files — contain secrets, never commit these
+.env
+.env.local
+
+# Mac OS system files — created automatically by Finder
+.DS_Store
+
+# Editor folders
+.vscode/
+.idea/

@@ -1,0 +1,174 @@
+================================================================================
+  WEEK 1 REFERENCE — Text as Numbers: Embeddings & Semantic Search
+================================================================================
+
+--------------------------------------------------------------------------------
+  WHAT WE BUILT
+--------------------------------------------------------------------------------
+
+A CLI tool that takes a natural language question and finds the most
+semantically similar text from a list — without matching anyS keywords.
+
+Example:
+  Input:  "how do I log out"
+  Output: "How to sign out from your account"  (similarity: 0.92)
+
+The word "log out" never appears in the result. The tool understood the meaning.
+
+--------------------------------------------------------------------------------
+  THE CORE PROBLEM THIS SOLVES
+--------------------------------------------------------------------------------
+
+Computers normally compare text as sequences of characters.
+"logout" and "sign out" are completely different character sequences — a
+computer has no idea they mean the same thing.
+
+Traditional search: looks for exact word matches → misses synonyms, paraphrases
+Semantic search:    looks for similar meaning  → finds conceptually related text
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 1: EMBEDDINGS
+--------------------------------------------------------------------------------
+
+An embedding is a list of numbers (a vector) that represents the MEANING
+of a piece of text.
+
+  "cat"       →  [0.21, -0.45, 0.78, ...]   (768 numbers)
+  "kitten"    →  [0.20, -0.44, 0.79, ...]   (very similar numbers)
+  "airplane"  →  [-0.7, 0.33, -0.91, ...]   (very different numbers)
+
+The model that produces these numbers was trained on billions of documents.
+It learned that words appearing in similar contexts should have similar numbers.
+It was never told what words mean — it discovered meaning from patterns.
+
+  - Each piece of text maps to a fixed-size list of numbers (768 for nomic-embed-text)
+  - Similar meanings → numbers that are close together in mathematical space
+  - Different meanings → numbers that are far apart
+  - This is called "vector space representation"
+
+The model we use: nomic-embed-text (runs locally via Ollama, no internet needed)
+Output size: 768 numbers per piece of text
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 2: COSINE SIMILARITY
+--------------------------------------------------------------------------------
+
+Once two texts are represented as lists of numbers, we need a formula to
+measure how similar they are.
+
+WHY COSINE SIMILARITY (not just subtract the numbers)?
+  Because we care about DIRECTION (what the text is about), not MAGNITUDE
+  (how many words it has). Two short and two long texts about the same topic
+  should score as similar even if one has more words.
+
+  Think of each embedding as an arrow pointing in a direction in 768D space.
+  Cosine similarity measures the ANGLE between two arrows.
+  - Angle = 0°   → same direction → similarity = 1.0  (identical meaning)
+  - Angle = 90°  → perpendicular  → similarity = 0.0  (unrelated)
+  - Angle = 180° → opposite       → similarity = -1.0 (opposite meaning)
+
+THE FORMULA:
+
+  cosine_similarity(A, B) = (A · B) / (||A|| × ||B||)
+
+  Where:
+
+  A · B  =  dot product
+            Multiply each pair of elements, then sum all results.
+            [1, 2, 3] · [4, 5, 6] = (1×4) + (2×5) + (3×6) = 4 + 10 + 18 = 32
+            This captures how much two vectors "agree" in each dimension.
+
+  ||A||  =  norm (magnitude / length) of vector A
+            Square root of the sum of all squared values.
+            ||[3, 4]|| = sqrt(3² + 4²) = sqrt(9 + 16) = sqrt(25) = 5
+            Used to cancel out the effect of vector length.
+
+  The division normalises the dot product so the result is always -1 to 1,
+  regardless of how large the numbers in the vectors are.
+
+SCORE INTERPRETATION (for text embeddings):
+  0.90 - 1.00  →  near-identical meaning
+  0.70 - 0.90  →  very similar meaning
+  0.50 - 0.70  →  related topic
+  0.30 - 0.50  →  loosely related or unrelated
+  below 0.30   →  completely different topics
+
+NOTE: Text embeddings rarely go below 0.3 or above 0.98.
+      If your best result scores below 0.5, the knowledge base
+      probably doesn't contain a good match.
+
+--------------------------------------------------------------------------------
+  PROJECT FILE STRUCTURE
+--------------------------------------------------------------------------------
+
+  similar-snippets/
+  ├── venv/                ← Python's isolated package sandbox (never edit this)
+  ├── requirements.txt     ← list of installed packages (ollama, numpy)
+  ├── get_embedding.py     ← converts text to a list of 768 numbers via Ollama
+  ├── similarity.py        ← measures how close two embeddings are
+  └── main.py              ← the CLI app that ties everything together
+
+--------------------------------------------------------------------------------
+  WHAT EACH FILE DOES
+--------------------------------------------------------------------------------
+
+get_embedding.py
+  - Calls the local Ollama server
+  - Sends text to the nomic-embed-text model
+  - Returns a list of 768 floats
+  - Used by: main.py (to embed snippets and queries)
+
+similarity.py
+  - cosine_similarity(vec_a, vec_b)
+      Takes two embedding vectors, returns a score from -1 to 1
+  - find_most_similar(query_embedding, knowledge_base, top_k=3)
+      Compares a query against every item in the knowledge base
+      Returns the top_k closest matches sorted by score
+  - Used by: main.py (to rank search results)
+
+main.py
+  - Holds the SNIPPETS list (the texts to search through)
+  - build_knowledge_base(): embeds all snippets at startup, stores text + embedding
+  - search(): embeds the user's query and calls find_most_similar
+  - main(): the CLI loop — takes input, shows results, runs until "quit"
+
+--------------------------------------------------------------------------------
+  HOW TO RUN
+--------------------------------------------------------------------------------
+
+Step 1: Start Ollama server (in a separate terminal tab, keep it running)
+  ollama serve
+
+Step 2: Activate your virtual environment
+  source venv/bin/activate
+
+Step 3: Run the CLI
+  python3 main.py
+
+--------------------------------------------------------------------------------
+  HOW THIS CONNECTS TO DOCUMIND (THE FINAL CAPSTONE)
+--------------------------------------------------------------------------------
+
+Every component you built this week exists in DocuMind at larger scale:
+
+  Week 1                            →  DocuMind (Week 20)
+  ─────────────────────────────────────────────────────────
+  SNIPPETS list in Python           →  Millions of chunks in PostgreSQL
+  get_embedding()                   →  Same function, same Ollama model
+  build_knowledge_base()            →  Celery worker processing uploaded PDFs
+  find_most_similar()               →  pgvector's <=> operator inside SQL
+  while True CLI loop               →  POST /search endpoint in FastAPI API
+  Python list storage               →  ChromaDB (Week 2) → pgvector (Week 4)
+
+--------------------------------------------------------------------------------
+  THE ONE LIMITATION OF WEEK 1
+--------------------------------------------------------------------------------
+
+Every time main.py runs, it re-embeds all snippets from scratch.
+10 snippets = fast. 10,000 documents = hours of recomputation.
+And all embeddings disappear when the program exits.
+
+Week 2 fixes this: ChromaDB saves embeddings to disk permanently.
+Embed once. Load instantly on every future run.
+
+================================================================================
