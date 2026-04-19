@@ -1,0 +1,281 @@
+================================================================================
+  WEEK 3 REFERENCE — FastAPI + Docker
+================================================================================
+
+--------------------------------------------------------------------------------
+  WHAT WE BUILT
+--------------------------------------------------------------------------------
+
+A REST API version of the Smart Notes CLI, running inside Docker.
+Same ChromaDB logic from Week 2, now accessible over HTTP from anywhere.
+
+Endpoints:
+  GET    /health              → health check, returns note count
+  POST   /notes               → add a note (body: {"text": "...", "tag": "..."})
+  GET    /notes/search?q=...  → semantic search (?q=query&top=3)
+  GET    /notes               → list all notes
+  DELETE /notes/{id}          → delete a note by ID
+
+Auto-generated docs at: http://localhost:8000/docs
+
+--------------------------------------------------------------------------------
+  THE PROBLEM WEEK 2 HAD
+--------------------------------------------------------------------------------
+
+The Smart Notes CLI only worked on one laptop.
+No HTTP interface — couldn't be called from a browser or another service.
+Data lived in a local folder — couldn't be shared across machines.
+Setup required: right Python version, venv, pip install, correct commands.
+
+Week 3 fixes:
+  FastAPI  → HTTP interface anyone can call
+  Docker   → identical setup anywhere, one command to run
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 1: FastAPI
+--------------------------------------------------------------------------------
+
+Python's equivalent of ASP.NET Core Web API.
+
+  ASP.NET Core                    FastAPI
+  ─────────────────────────────────────────────────────
+  [HttpPost("/notes")]            @app.post("/notes")
+  [HttpGet("/notes")]             @app.get("/notes")
+  IActionResult                   return dict (auto-serialized to JSON)
+  Request body DTO                Pydantic model (BaseModel)
+  app.Run()                       uvicorn app.main:app
+  Swagger UI (manual setup)       /docs (built-in, automatic)
+
+Pydantic models = DTOs. Define the shape of incoming JSON.
+FastAPI validates automatically — missing field = 422 error, no code needed.
+
+  class NoteCreate(BaseModel):
+      text: str
+      tag: str = "general"   ← optional with default
+
+Route parameters:
+  Path param:  @app.delete("/notes/{note_id}") → def remove_note(note_id: str)
+  Query param: def search(q: str = Query(...), top: int = Query(3))
+  Body:        def create_note(note: NoteCreate)  ← Pydantic model = body
+
+Status codes:
+  200 OK      → default, successful read
+  201 Created → use for POST that creates a resource
+  404         → HTTPException(status_code=404, detail="...")
+  400         → HTTPException(status_code=400, detail="...")
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 2: Uvicorn
+--------------------------------------------------------------------------------
+
+The server that runs FastAPI. Like Kestrel in ASP.NET.
+
+  uvicorn app.main:app --reload
+    app.main  → the module path (app/main.py)
+    :app      → the FastAPI instance variable name inside that file
+    --reload  → restart on code changes (dev only, never in production)
+
+In Docker:
+  CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+  --host 0.0.0.0 → accept connections from outside the container
+                   without this, uvicorn only listens on localhost inside
+                   the container and is unreachable from your laptop
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 3: Docker
+--------------------------------------------------------------------------------
+
+Packages your app + Python + all dependencies into a single unit (container).
+Runs identically on any machine with Docker installed.
+
+Two files:
+
+  Dockerfile         → HOW to build the image (recipe)
+  docker-compose.yml → HOW to run it (settings: ports, volumes, env vars)
+
+Key commands:
+  docker build -t notes-api .   → build the image manually
+  docker compose up --build     → build + run via docker-compose
+  docker compose up             → run (uses cached image)
+  Ctrl+C                        → stop
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 4: Dockerfile
+--------------------------------------------------------------------------------
+
+FROM python:3.11-slim
+  Start from an official Python image. slim = minimal OS, smaller size.
+  Use 3.11 not 3.14 — newer versions may lack stable Docker images.
+
+WORKDIR /app
+  All commands run from /app inside the container.
+  Creates the folder if it doesn't exist.
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+  Copy requirements FIRST, then install — before copying the rest of the code.
+  WHY: Docker caches each layer. If you change one line of code and
+  requirements haven't changed, Docker skips the install step entirely.
+  Builds go from 2 minutes → 5 seconds.
+  --no-cache-dir: don't store pip's download cache in the image (saves space).
+
+COPY . .
+  Now copy the actual code.
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+  Command that runs when the container starts.
+  Written as a list of strings (not a shell string) — safer, no shell injection.
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 5: docker-compose.yml
+--------------------------------------------------------------------------------
+
+build: .
+  Build from the Dockerfile in the current directory.
+
+ports:
+  - "8000:8000"
+  Laptop port 8000 → Container port 8000.
+  Format: "host:container". Change to "9000:8000" to use port 9000 on laptop.
+
+volumes:
+  - ./chroma_db:/app/chroma_db
+  Mount a laptop folder into the container.
+  Container writes to /app/chroma_db → actually saves to ./chroma_db on laptop.
+  Data survives container restarts and deletion.
+  Format: "host_path:container_path"
+
+environment:
+  - OLLAMA_HOST=http://host.docker.internal:11434
+  - CHROMA_PATH=/app/chroma_db
+  Environment variables injected into the container.
+  host.docker.internal = special hostname pointing to your laptop (the host).
+  Inside Docker, localhost = the container itself, NOT your laptop.
+  So Ollama (running on laptop) must be reached via host.docker.internal.
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 6: .dockerignore
+--------------------------------------------------------------------------------
+
+Like .gitignore but for Docker build context.
+Without it, Docker copies venv/ (400MB+) into the image — wasted space and time.
+
+  venv/
+  __pycache__/
+  chroma_db/
+  *.pyc
+
+Result: build context dropped from 408MB → 505B.
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 7: store.py changes from Week 2
+--------------------------------------------------------------------------------
+
+One key addition: Ollama host is now configurable via environment variable.
+
+  OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+  ollama_client = ollama.Client(host=OLLAMA_HOST)
+
+Locally:  OLLAMA_HOST not set → defaults to localhost → works
+In Docker: OLLAMA_HOST=http://host.docker.internal:11434 → reaches laptop Ollama
+
+This pattern (env var with sensible default) is standard in production APIs.
+Never hardcode hostnames or ports in application code.
+
+--------------------------------------------------------------------------------
+  PROJECT FILE STRUCTURE
+--------------------------------------------------------------------------------
+
+  notes-api/
+  ├── app/
+  │   ├── __init__.py        ← makes app/ a Python package (required for imports)
+  │   ├── main.py            ← FastAPI routes (controller layer)
+  │   └── store.py           ← ChromaDB logic (data layer)
+  ├── Dockerfile             ← recipe for building the image (exact name, capital D)
+  ├── docker-compose.yml     ← how to run the container
+  ├── .dockerignore          ← what to exclude from the Docker build context
+  ├── requirements.txt
+  └── venv/
+
+Why app/ subfolder?
+  Production convention — application code lives in a package, not the root.
+  Allows clean imports: from app.store import add_note
+
+--------------------------------------------------------------------------------
+  BUGS CAUGHT AND FIXED
+--------------------------------------------------------------------------------
+
+1. FastApi vs FastAPI
+   Python is case-sensitive. The class is FastAPI (all caps).
+
+2. Missing @ on decorator
+   app.post("/notes") without @ is just a function call.
+   The function never gets registered as a route.
+
+3. -- build (space) vs --build
+   Docker flag must have no space. -- build is interpreted as a service name.
+
+4. DockerFile vs Dockerfile
+   Docker looks for exactly "Dockerfile" (capital D, lowercase f).
+   Any other casing causes "no such file or directory".
+
+5. venv/ not in .dockerignore
+   Build context was 408MB. After adding .dockerignore → 505B.
+
+6. Double underscore __get_embeddings vs single _get_embeddings
+   Python name mangling: __ prefix makes the name class-private.
+   In module-level functions, __ is just confusing and breaks calls.
+   Convention: single _ means "internal use only".
+
+7. _get_embeddings[query] vs _get_embeddings(query)
+   Square brackets = indexing. Parentheses = function call.
+
+8. return notes inside for loop
+   Indentation bug — returned after first iteration, not after all.
+
+--------------------------------------------------------------------------------
+  HOW TO RUN
+--------------------------------------------------------------------------------
+
+  # Make sure Ollama is running (already running in background usually)
+  ollama serve
+
+  # Start the API in Docker
+  docker compose up
+
+  # Open browser
+  http://localhost:8000/docs
+
+  # Stop
+  Ctrl+C
+
+  # Run in background (detached mode)
+  docker compose up -d
+  docker compose down   ← to stop
+
+--------------------------------------------------------------------------------
+  HOW THIS CONNECTS TO DOCUMIND (WEEK 20)
+--------------------------------------------------------------------------------
+
+  Week 3                          →   DocuMind (Week 20)
+  ──────────────────────────────────────────────────────
+  POST /notes                     →   POST /documents/upload
+  GET /notes/search?q=...         →   POST /search
+  NoteCreate (Pydantic model)     →   DocumentUpload, SearchRequest
+  Single service in compose       →   Multiple services (API + worker + DB)
+  host.docker.internal for Ollama →   Same pattern for internal services
+  chroma_db/ volume               →   PostgreSQL + pgvector volume
+
+--------------------------------------------------------------------------------
+  WEEK 3 LIMITATION (fixed in Week 4)
+--------------------------------------------------------------------------------
+
+ChromaDB is still a local folder. Two API servers can't share one chroma_db/.
+No real database — can't do complex queries, filtering, joins.
+No user authentication — anyone can read/delete all notes.
+
+Week 4: Replace ChromaDB with PostgreSQL + pgvector.
+Same vector search, but now it's a proper database — scalable, shareable,
+supports SQL queries alongside semantic search.
+
+================================================================================

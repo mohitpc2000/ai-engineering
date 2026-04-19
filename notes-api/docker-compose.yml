@@ -1,0 +1,19 @@
+services:
+  notes-api:
+    # Build the image from the Dockerfile in the current directory
+    build: .
+    # Map laptop port 8000 → container port 8000
+    # Format is host:container
+    ports:
+      - "8000:8000"
+    # Mount chroma_db/ from laptop into the container.
+    # This is how data survives container restarts.
+    # Format is host_path:container_path
+    volumes:
+      - ./chroma_db:/app/chroma_db
+    # Environment variables passed into the container.
+    # store.py reads OLLAMA_HOST to know where Ollama is.
+    # host.docker.internal = your laptop, as seen from inside Docker.
+    environment:
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - CHROMA_PATH=/app/chroma_db
