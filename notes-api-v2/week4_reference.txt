@@ -1,0 +1,257 @@
+================================================================================
+  WEEK 4 REFERENCE — PostgreSQL + pgvector
+================================================================================
+
+--------------------------------------------------------------------------------
+  WHAT WE BUILT
+--------------------------------------------------------------------------------
+
+Same Notes API as Week 3, but replaced ChromaDB with PostgreSQL + pgvector.
+Data now lives in a real database that can be shared across multiple servers.
+
+Endpoints (identical to Week 3):
+  GET    /health
+  POST   /notes
+  GET    /notes/search?q=...
+  GET    /notes
+  DELETE /notes/{id}
+
+Two Docker services this time:
+  postgres   — runs the database
+  notes-api  — runs our FastAPI app
+
+--------------------------------------------------------------------------------
+  THE PROBLEM WEEK 3 HAD
+--------------------------------------------------------------------------------
+
+ChromaDB stored data in a local folder (chroma_db/).
+Two API servers couldn't share one chroma_db/ folder.
+No real SQL — couldn't filter, join, or do complex queries.
+Not a production-grade database.
+
+Week 4 fixes:
+  PostgreSQL  → real database, shareable, supports SQL + vector search
+  pgvector    → adds vector type and <=> cosine distance operator to Postgres
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 1: pgvector
+--------------------------------------------------------------------------------
+
+pgvector is a Postgres extension that adds:
+  - A new column type: vector(768)
+  - A new operator:    <=> for cosine distance
+
+Without it, Postgres doesn't know what a vector is.
+Install it once per database with: CREATE EXTENSION IF NOT EXISTS vector;
+
+The <=> operator returns cosine DISTANCE (0 = identical, 2 = opposite).
+Convert to similarity: 1 - (embedding <=> query_vector)
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 2: init.sql
+--------------------------------------------------------------------------------
+
+A SQL file that Postgres runs automatically on first start.
+Place it at: /docker-entrypoint-initdb.d/init.sql inside the container.
+Mount it from your laptop via docker-compose volumes.
+
+Runs ONCE on a fresh database. Never again after that.
+This is where you create extensions, tables, and indexes.
+
+Our init.sql:
+  CREATE EXTENSION IF NOT EXISTS vector;
+  CREATE TABLE IF NOT EXISTS notes (
+      id TEXT PRIMARY KEY,
+      text TEXT,
+      tag TEXT DEFAULT 'general',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      embedding vector(768)
+  );
+  CREATE INDEX IF NOT EXISTS notes_embedding_idx
+      ON notes USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 3: ivfflat index
+--------------------------------------------------------------------------------
+
+Without an index, Postgres checks every row for vector similarity. Slow.
+ivfflat groups vectors into clusters at build time.
+At search time, only checks relevant clusters. Fast.
+
+  USING ivfflat          → the ANN algorithm
+  (embedding             → which column to index
+  vector_cosine_ops)     → use cosine distance math (must match your query)
+  WITH (lists = 100)     → 100 clusters, good default for small-medium data
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 4: psycopg2
+--------------------------------------------------------------------------------
+
+Python library to connect to and query PostgreSQL.
+Like SqlClient in .NET.
+
+  conn = psycopg2.connect(host=..., dbname=..., user=..., password=...)
+  cur = conn.cursor()         # like SqlCommand
+  cur.execute(sql, params)    # run a query
+  cur.fetchall()              # get all rows as list of tuples
+  conn.commit()               # REQUIRED after INSERT/UPDATE/DELETE
+  conn.close()                # close the connection
+
+Parameters use %s placeholders (never f-strings — SQL injection risk):
+  cur.execute("INSERT INTO notes VALUES (%s, %s)", (id, text))
+
+Single-element tuple needs trailing comma:
+  cur.execute("DELETE FROM notes WHERE id = %s", (note_id,))
+  NOT: (note_id)  ← this is just parentheses, not a tuple
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 5: register_vector
+--------------------------------------------------------------------------------
+
+from pgvector.psycopg2 import register_vector
+
+Tells psycopg2 how to translate between Python (numpy array) and Postgres vector.
+Must be called AFTER creating the connection, not at module level.
+Without it: Postgres receives a plain array and rejects it with type error.
+
+Return embeddings as numpy arrays:
+  return np.array(response['embedding'])
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 6: docker-compose with two services
+--------------------------------------------------------------------------------
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16    ← pre-built image, pgvector included
+    environment:
+      POSTGRES_DB: notes
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data   ← data persists on laptop
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql  ← startup script
+
+  notes-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - POSTGRES_HOST=postgres      ← service name, not localhost
+      - POSTGRES_DB=notes
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - OLLAMA_HOST=http://host.docker.internal:11434
+    depends_on:
+      - postgres                    ← start postgres first
+
+volumes:
+  postgres_data:                    ← must declare named volumes here
+
+Key rules:
+  POSTGRES_HOST=postgres  → containers find each other by service name
+  host.docker.internal    → reaches your laptop from inside a container
+  depends_on              → controls startup order
+  volumes: (top level)    → required declaration for named volumes
+
+--------------------------------------------------------------------------------
+  KEY CONCEPT 7: store.py pattern
+--------------------------------------------------------------------------------
+
+Every function follows the same pattern:
+
+  def some_function(...):
+      conn = get_connection()
+      cur = conn.cursor()
+      cur.execute(sql, params)
+      # for reads: rows = cur.fetchall()
+      # for writes: conn.commit()
+      conn.close()
+      # for reads: return processed rows
+
+get_connection() centralizes connection logic and register_vector call.
+
+--------------------------------------------------------------------------------
+  PROJECT FILE STRUCTURE
+--------------------------------------------------------------------------------
+
+  notes-api-v2/
+  ├── app/
+  │   ├── __init__.py        ← makes app/ a Python package
+  │   ├── main.py            ← FastAPI routes (identical to Week 3)
+  │   └── store.py           ← PostgreSQL data layer (replaces ChromaDB)
+  ├── init.sql               ← runs once on Postgres first start
+  ├── Dockerfile             ← same as Week 3
+  ├── docker-compose.yml     ← now has two services: postgres + notes-api
+  ├── .dockerignore
+  ├── .gitignore
+  ├── requirements.txt       ← added psycopg2-binary, pgvector, numpy
+  └── venv/
+
+--------------------------------------------------------------------------------
+  BUGS CAUGHT AND FIXED
+--------------------------------------------------------------------------------
+
+1. operator does not exist: vector <=> numeric[]
+   psycopg2 sent a plain list, Postgres expected vector type.
+   Fix: return np.array(...) from _get_embedding + add numpy to requirements.
+
+2. Single-element tuple missing trailing comma
+   (note_id) → just parentheses, not a tuple
+   (note_id,) → correct single-element tuple
+
+--------------------------------------------------------------------------------
+  HOW TO RUN
+--------------------------------------------------------------------------------
+
+  # Make sure Ollama is running on your laptop
+  ollama serve   (in a separate terminal)
+
+  # Start both containers
+  docker compose up --build   (first time or after code changes)
+  docker compose up           (subsequent runs)
+
+  # Open browser
+  http://localhost:8000/docs
+
+  # Stop
+  Ctrl+C
+
+--------------------------------------------------------------------------------
+  WEEK 3 vs WEEK 4 COMPARISON
+--------------------------------------------------------------------------------
+
+  Week 3 (ChromaDB)                    Week 4 (PostgreSQL + pgvector)
+  ──────────────────────────────────────────────────────────────────
+  chromadb.PersistentClient()          psycopg2.connect()
+  collection.add()                     cur.execute("INSERT INTO notes...")
+  collection.query()                   cur.execute("SELECT ... <=> ...")
+  collection.get()                     cur.execute("SELECT ...")
+  collection.delete()                  cur.execute("DELETE FROM notes...")
+  Local folder (chroma_db/)            Real database (shared, scalable)
+  No SQL                               Full SQL + vector search
+  Single service in compose            Two services (api + postgres)
+
+--------------------------------------------------------------------------------
+  HOW THIS CONNECTS TO DOCUMIND (WEEK 20)
+--------------------------------------------------------------------------------
+
+  Week 4                          →   DocuMind (Week 20)
+  ──────────────────────────────────────────────────────
+  notes table                     →   documents + chunks tables
+  embedding vector(768)           →   same, but for document chunks
+  <=> cosine search               →   same operator, production RAG search
+  init.sql                        →   full schema migration
+  Two services in compose         →   many services (api, worker, redis, db)
+
+--------------------------------------------------------------------------------
+  WEEK 4 LIMITATION (fixed in Week 5)
+--------------------------------------------------------------------------------
+
+Every search re-embeds the query from scratch.
+If 100 users search "python tutorials" at the same time, Ollama runs 100 times.
+Slow and wasteful.
+
+Week 5: Add Redis caching. Same query → return cached result instantly.
+
+================================================================================

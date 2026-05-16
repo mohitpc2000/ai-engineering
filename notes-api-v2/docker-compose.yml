@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: notes
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+  notes-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=notes
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - OLLAMA_HOST=http://host.docker.internal:11434
+    depends_on:
+      - postgres
+volumes:
+  postgres_data:
